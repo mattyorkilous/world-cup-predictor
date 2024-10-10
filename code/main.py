@@ -10,7 +10,7 @@ import simulate_tournament as st
 
 
 def main() -> None:
-    dir: str = '/Users/ianyorkilous/Documents/Projects/Soccer'
+    dir: str = [directory]
 
     file_names: list[str] = [
         x for x in listdir(dir + '/data') if x.endswith('.csv')
