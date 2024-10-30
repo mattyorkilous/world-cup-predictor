@@ -54,6 +54,15 @@ def replace_original_names(
     return matches_names_replaced
 
 
+def swap_underscore(text: str) -> str:
+    if '_' in text:
+        first, second = text.split('_', 1)
+
+        return f"{second}_{first}"
+    
+    return text
+
+
 def process_matches(matches_raw: pd.DataFrame) -> pd.DataFrame:
     matches: pd.DataFrame = (
         matches_raw
@@ -92,15 +101,6 @@ def process_matches(matches_raw: pd.DataFrame) -> pd.DataFrame:
     )
 
     return matches
-
-
-def swap_underscore(text: str) -> str:
-    if '_' in text:
-        first, second = text.split('_', 1)
-
-        return f"{second}_{first}"
-    
-    return text
 
 
 def classify_tournament(tournament: pd.Series) -> np.ndarray:
