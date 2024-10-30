@@ -54,17 +54,6 @@ def replace_original_names(
     return matches_names_replaced
 
 
-def remove_accents(column: pd.Series) -> pd.Series:
-    accents_removed: pd.Series = (
-        column
-            .str.normalize('NFKD')
-            .str.encode('ascii', errors='ignore')
-            .str.decode('utf-8')
-    )
-
-    return accents_removed
-
-
 def process_matches(matches_raw: pd.DataFrame) -> pd.DataFrame:
     matches: pd.DataFrame = (
         matches_raw
