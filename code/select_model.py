@@ -37,7 +37,7 @@ def split_data(matches: pd.DataFrame) -> list[pd.DataFrame]:
             + [
                 'h2h_rate_win_home',
                 'h2h_rate_loss_home',
-                'home_stadium_or_not'
+                'neutral'
             ]
     )
 

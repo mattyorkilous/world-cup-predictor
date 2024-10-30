@@ -1,15 +1,17 @@
 import pandas as pd
-import extract_features as ef
+from extract_features import (
+    join_pre_match_elos, melt_matches, update_elos, flatten_columns
+)
 from sklearn.pipeline import Pipeline
 import numpy as np
-import clean_data as cd
+from clean_data import process_matches
 from functools import reduce
 from itertools import accumulate
 
 
 def simulate_tournament(
         model: Pipeline, 
-        match_records: pd.DataFrame, 
+        matches: pd.DataFrame, 
         elos: pd.DataFrame,
         rng: np.random.Generator
 ) -> tuple[pd.DataFrame, list[pd.DataFrame], str]:
@@ -19,14 +21,10 @@ def simulate_tournament(
         groups
     )
 
-    (
-        group_table, 
-        match_records_post_group, 
-        elos_post_group
-    ) = predict_group_stage(
+    group_table, matches_post_group, elos_post_group = predict_group_stage(
         matchdays_group_stage, 
         model, 
-        match_records, 
+        matches, 
         elos,
         rng
     )
@@ -37,7 +35,7 @@ def simulate_tournament(
         bracket,
         model,
         elos_post_group,
-        match_records_post_group,
+        matches_post_group,
         rng,
         predictions_so_far=[]
     )
@@ -51,7 +49,7 @@ def create_groups() -> pd.DataFrame:
     groups: pd.DataFrame = (
         pd.DataFrame(
             {
-                'group': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+                'group_name': ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
                 'teams': [
                     ['Qatar', 'Ecuador', 'Senegal', 'Netherlands'],
                     ['England', 'Iran', 'United States', 'Wales'],
@@ -113,33 +111,29 @@ def get_group_stage_matchday(
         host_nation: str
 ) -> pd.DataFrame:
     matchday: pd.DataFrame = (
-        pd.concat(
-            [
-                get_group_matchday(
-                    matchup_pattern, 
-                    group, 
-                    matchday_date, 
-                    host_nation
-                )
-                for _, group in groups.iterrows()
-            ]
-        )
+        pd.concat([
+            get_group_matchday(
+                group,
+                matchup_pattern,
+                matchday_date, 
+                host_nation
+            )
+            for _, group in groups.iterrows()
+        ])
         .reset_index(drop=True)
-        .assign(match_id=lambda df: df.index)
-        [
-            [
-                'match_id', 'date', 'tournament', 'group', 
-                'team_home', 'team_away', 'home_stadium_or_not'
-            ]
-        ]
+        .reset_index()
+        [[
+            'index', 'date', 'tournament', 'group_name', 
+            'team_home', 'team_away', 'country', 'neutral'
+        ]]
     )
 
     return matchday
 
 
 def get_group_matchday(
-        matchup_pattern: list[tuple[int, ...]], 
         group: pd.Series,
+        matchup_pattern: list[tuple[int, ...]],
         matchday_date: pd.Timestamp,
         host_nation: str
 ) -> pd.DataFrame:
@@ -154,11 +148,11 @@ def get_group_matchday(
             columns=['team_home', 'team_away']
         )
         .assign(
-            group=group_name,
+            group_name=group_name,
             date=matchday_date,
-            tournament='World Cup Groups',
-            home_stadium_or_not=lambda df: (df['team_home'] == host_nation)
-                .astype(int)
+            tournament='World Cup',
+            country=host_nation,
+            neutral=lambda df: (df['team_home'] != host_nation)
         )
     )
 
@@ -168,20 +162,21 @@ def get_group_matchday(
 def predict_group_stage(
         matchdays_group_stage: list[pd.DataFrame], 
         model: Pipeline, 
-        match_records: pd.DataFrame, 
+        matches: pd.DataFrame, 
         elos: pd.DataFrame,
         rng: np.random.Generator
 ) -> list[pd.DataFrame]:
     predictions_accumulated: list[list[pd.DataFrame]] = list(
         accumulate(
             matchdays_group_stage, 
-            func=lambda x, y: predict_matchday_update_records(
-                x, 
-                y, 
-                model=model,
-                rng=rng
-            ),
-            initial=[pd.DataFrame(), match_records, elos]
+            func=lambda predictions__matches__elos, matchday: 
+                predict_matchday_update_records(
+                    predictions__matches__elos, 
+                    matchday, 
+                    model=model,
+                    rng=rng
+                ),
+            initial=[pd.DataFrame(), matches, elos]
         )
     )
 
@@ -189,48 +184,27 @@ def predict_group_stage(
         [x[0] for x in predictions_accumulated][1:]
     )
 
-    group_table: pd.DataFrame = (
-        ef.melt_matches(
-            pd.concat(predictions_group_stage), 
-            id_vars=['match_id', 'group', 'date']
-        )
-        .assign(
-            points=lambda df: np.select(
-                (df['win'] == True, df['loss'] == True),
-                (3, 0),
-                1
-            ),
-            gd=lambda df: df['goals_for'] - df['goals_against']
-        )
-        .groupby(['group', 'team'])
-        [['points', 'gd', 'goals_for']]
-        .agg('sum')
-        .reset_index()
-        .sort_values(
-            ['group', 'points', 'gd', 'goals_for'], 
-            ascending=[True, False, False, False]
-        )
-    )
+    group_table: pd.DataFrame = get_group_table(predictions_group_stage)
 
-    match_records_updated, elos_updated = [
+    matches_post_group, elos_post_group = [
         predictions_accumulated[-1][i] for i in (1, 2)
     ]
 
-    return [group_table, match_records_updated, elos_updated]
+    return [group_table, matches_post_group, elos_post_group]
 
 
 def predict_matchday_update_records(
-        preds__match_records__elos: list[pd.DataFrame],
+        predictions__matches__elos: list[pd.DataFrame],
         matchday: pd.DataFrame,
         model: Pipeline,
         rng: np.random.Generator
 ) -> list[pd.DataFrame]:
-    _, match_records, elos = preds__match_records__elos
+    _, matches, elos = predictions__matches__elos
 
     matchday_features: pd.DataFrame = extract_matchday_features(
         matchday, 
         elos, 
-        match_records
+        matches
     )
 
     predictions_matchday = predict_matchday(
@@ -244,41 +218,38 @@ def predict_matchday_update_records(
         for i in range(len(predictions_matchday))
     ]
 
-    elos_updated = reduce(ef.update_elos, predictions_matchday_list, elos)
+    elos_updated = reduce(update_elos, predictions_matchday_list, elos)
 
-    match_records_updated = (
-        pd.concat(
-            [
-                match_records, 
-                predictions_matchday
-                    .assign(
-                        match_id=lambda df: range(
-                            match_records['match_id'].max() + 1,
-                            match_records['match_id'].max() + 1 + len(df)
-                        )
-                    )
-                    [match_records.columns]
-            ]
-        )
+    predictions_reindexed: pd.DataFrame = (
+        predictions_matchday
+            .assign(
+                index=lambda df: range(
+                    matches['index'].max() + 1,
+                    matches['index'].max() + 1 + len(df)
+                )
+            )
+            [matches.columns]
     )
 
-    return [predictions_matchday, match_records_updated, elos_updated]
+    matches_updated = pd.concat([matches, predictions_reindexed])
+
+    return [predictions_matchday, matches_updated, elos_updated]
 
 
 def extract_matchday_features(
         matchday: pd.DataFrame, 
         elos: pd.DataFrame,
-        match_records: pd.DataFrame
+        matches: pd.DataFrame
 ) -> pd.DataFrame:
-    elos_matchday: pd.DataFrame = ef.join_pre_match_elos(matchday, elos)
+    elos_matchday: pd.DataFrame = join_pre_match_elos(matchday, elos)
 
-    team_match_records: pd.DataFrame = ef.melt_matches(match_records)
+    team_matches: pd.DataFrame = melt_matches(matches)
 
     form_cols: list[str] = ['goals_for', 'goals_against', 'win', 'loss']
 
     team_form_matchday: pd.DataFrame = get_matchday_team_form(
         matchday,
-        team_match_records, 
+        team_matches, 
         form_cols
     )
 
@@ -286,7 +257,7 @@ def extract_matchday_features(
 
     h2h_rates_matchday: pd.DataFrame = get_matchday_h2h_rates(
         matchday,
-        team_match_records, 
+        team_matches, 
         h2h_rate_cols
     )
 
@@ -295,8 +266,6 @@ def extract_matchday_features(
         team_form_matchday, 
         form_cols
     )
-
-    teams_matchday.columns = ef.flatten_columns(teams_matchday.columns)
 
     matchday_features: pd.DataFrame = join_matchday_features(
         elos_matchday,
@@ -309,11 +278,11 @@ def extract_matchday_features(
 
 def get_matchday_team_form(
         matchday: pd.DataFrame,
-        team_match_records: pd.DataFrame,
+        team_matches: pd.DataFrame,
         form_cols: list[str]
 ) -> pd.DataFrame:
     team_form_matchday: pd.DataFrame = (
-        team_match_records
+        team_matches
             .loc[
                 lambda df: (df['team'].isin(matchday['team_home'])) 
                     | (df['team'].isin(matchday['team_away'])) 
@@ -334,11 +303,11 @@ def get_matchday_team_form(
 
 def get_matchday_h2h_rates(
         matchday: pd.DataFrame,
-        team_match_records: pd.DataFrame, 
+        team_matches: pd.DataFrame, 
         h2h_rate_cols: list[str]
 ) -> pd.DataFrame:
     h2h_rates_matchday_1: pd.DataFrame = (
-        team_match_records
+        team_matches
             .merge(
                 matchday[['team_home', 'team_away']], 
                 how='left', 
@@ -381,15 +350,17 @@ def get_matchday_teams(
         form_cols: list[str]
 ) -> pd.DataFrame:
     teams_matchday: pd.DataFrame = (
-        ef.melt_matches(matchday)
+        melt_matches(matchday)
             .merge(team_form, how='left', on='team')
             .pivot(
-                index='match_id', 
+                index='index', 
                 columns='team_type', 
                 values=[f'form_avg_{col}' for col in form_cols]
             )
             .reset_index()
     )
+
+    teams_matchday.columns = flatten_columns(teams_matchday.columns)
 
     return teams_matchday
 
@@ -401,7 +372,7 @@ def join_matchday_features(
 ) -> pd.DataFrame:
     matchday_features: pd.DataFrame = (
         elos_matchday
-            .merge(teams_matchday, how='left', on='match_id')
+            .merge(teams_matchday, how='left', on='index')
             .merge(
                 h2h_rates_matchday, 
                 how='left', 
@@ -431,15 +402,46 @@ def predict_matchday(
         model.predict(matchday_features)
     )
 
-    matchday_prediction: pd.DataFrame = cd.clean_match_records(
+    matchday_scores: pd.DataFrame = (
         matchday_features
             .assign(
-                goals_home=[score[0] for score in scores_predicted],
-                goals_away=[score[1] for score in scores_predicted]
+                score_home=[score[0] for score in scores_predicted],
+                score_away=[score[1] for score in scores_predicted]
             )
     )
 
+    matchday_prediction: pd.DataFrame = process_matches(matchday_scores)
+
     return matchday_prediction
+
+
+def get_group_table(
+        predictions_group_stage: list[pd.DataFrame]
+) -> pd.DataFrame:
+    group_table: pd.DataFrame = (
+        melt_matches(
+            pd.concat(predictions_group_stage), 
+            id_vars=['index', 'group_name', 'date']
+        )
+        .assign(
+            points=lambda df: np.select(
+                (df['win'] == True, df['loss'] == True),
+                (3, 0),
+                1
+            ),
+            gd=lambda df: df['goals_for'] - df['goals_against']
+        )
+        .groupby(['group_name', 'team'])
+        [['points', 'gd', 'goals_for']]
+        .agg('sum')
+        .reset_index()
+        .sort_values(
+            ['group_name', 'points', 'gd', 'goals_for'], 
+            ascending=[True, False, False, False]
+        )
+    )
+
+    return group_table
 
 
 def create_bracket(
@@ -448,23 +450,25 @@ def create_bracket(
 ) -> pd.DataFrame:
     bracket_template: pd.DataFrame = pd.DataFrame(
         {
-            'match_id': [i // 2 for i in range(16)],
-            'group': (list('abcdefghbadcfehg')), 
+            'index': [i // 2 for i in range(16)],
+            'group_name': (list('abcdefghbadcfehg')), 
             'position': ([1, 2] * 8)
         }
     )
 
     teams_remaining: pd.DataFrame = (
         group_table
-            .groupby('group')
+            .groupby('group_name')
             .head(2)
-            .assign(position=lambda df: df.groupby('group').cumcount() + 1)
-            [['group', 'position', 'team']]
+            .assign(
+                position=lambda df: df.groupby('group_name').cumcount() + 1
+            )
+            [['group_name', 'position', 'team']]
     )
 
     bracket_teams: pd.DataFrame = (
         bracket_template
-            .merge(teams_remaining, how='left', on=['group', 'position'])
+            .merge(teams_remaining, how='left', on=['group_name', 'position'])
     )
 
     bracket: pd.DataFrame = assign_team_types(bracket_teams, host_nation)
@@ -478,22 +482,24 @@ def assign_team_types(
 ) -> pd.DataFrame:
     bracket: pd.DataFrame = (
         bracket_teams
-            .groupby('match_id')
-            [['match_id', 'team']]
-            .apply(lambda group: assign_team_type(group, host_nation))
-            # Don't love this solution, since it requires that weird
-            # column selection line to work around a warning. Look for 
-            # a better solution with pivoting?
+            .groupby('index')
+            [['index', 'team']]
+            .apply(
+                lambda data_group: assign_team_type(data_group, host_nation)
+            )
             .reset_index(drop=True)
     )
 
     return bracket
 
 
-def assign_team_type(group: pd.DataFrame, host_nation: str) -> pd.DataFrame:
-    if host_nation in group['team'].values:
-        group_updated: pd.DataFrame = (
-            group
+def assign_team_type(
+        data_group: pd.DataFrame, 
+        host_nation: str
+) -> pd.DataFrame:
+    if host_nation in data_group['team'].values:
+        data_group_updated: pd.DataFrame = (
+            data_group
                 .assign(
                     team_type=lambda df: np.where(
                         df['team'] == host_nation, 
@@ -503,16 +509,19 @@ def assign_team_type(group: pd.DataFrame, host_nation: str) -> pd.DataFrame:
                 )
         )
     else:
-        group_updated: pd.DataFrame = group.assign(team_type=['home', 'away'])
+        data_group_updated: pd.DataFrame = (
+            data_group
+                .assign(team_type=['home', 'away'])
+        )
     
-    return group_updated
+    return data_group_updated
 
 
 def predict_knockout_stage(
         bracket: pd.DataFrame,
         model: Pipeline,
         elos: pd.DataFrame,
-        match_records: pd.DataFrame,
+        matches: pd.DataFrame,
         rng: np.random.Generator,
         predictions_so_far: list[pd.DataFrame],
         start_date: pd.Timestamp = pd.to_datetime('2022-11-23'),
@@ -526,67 +535,40 @@ def predict_knockout_stage(
 
     (
         predictions_matchday, 
-        match_records_updated, 
+        matches_updated, 
         elos_updated
     ) = predict_matchday_update_records(
-        [pd.DataFrame(), match_records, elos],
+        [pd.DataFrame(), matches, elos],
         matchday,
         model,
         rng
     )
 
-    draws: pd.Series = (
-        predictions_matchday
-            .loc[
-                lambda df: 
-                    (df['win_home'] == False) & (df['loss_home'] == False)
-            ]
-            ['match_id']
-    )
+    draws: pd.Series = locate_draws(predictions_matchday)
 
-    samples: np.ndarray = rng.uniform(size=len(draws))
-
-    shootout_wins_home = [
-        draw for draw, sample in zip(draws, samples) if sample >= 0.5
-    ]
-
-    predictions_post_shootout = (
-        predictions_matchday
-            .assign(
-                win_home=lambda df: np.where(
-                    df['match_id'].isin(shootout_wins_home), 
-                    True, 
-                    df['win_home']
-                ),
-                win_away=lambda df: np.where(
-                    (df['match_id'].isin(draws)) & 
-                        (~df['match_id'].isin(shootout_wins_home)),
-                    True,
-                    df['win_away']
-                )
-            )
+    predictions_post_shootout: pd.DataFrame = predict_shootouts(
+        predictions_matchday, 
+        draws, 
+        rng
     )
 
     if (len(predictions_post_shootout) == 1):
         return (predictions_so_far + [predictions_post_shootout])
 
-    bracket_teams_next: pd.DataFrame = (
-        ef.melt_matches(predictions_post_shootout)
-            .loc[lambda df: df['win']]
-            .assign(
-                match_id=[
-                    i // 2 for i in range(len(predictions_post_shootout))
-                ]
-            )
+    bracket_teams_next_round: pd.DataFrame = get_next_round(
+        predictions_post_shootout
     )
 
-    bracket_next = assign_team_types(bracket_teams_next, host_nation)
+    bracket_next_round = assign_team_types(
+        bracket_teams_next_round, 
+        host_nation
+    )
 
     return predict_knockout_stage(
-        bracket_next,
+        bracket_next_round,
         model,
         elos_updated,
-        match_records_updated,
+        matches_updated,
         rng,
         predictions_so_far + [predictions_post_shootout],
         start_date + pd.Timedelta(days=1)
@@ -603,30 +585,86 @@ def get_knockout_stage_matchday(
             .assign(
                 team_type=lambda df: ['team_' + x for x in df['team_type']]
             )
-            [['match_id', 'team', 'team_type']]
-            .pivot(columns='team_type', index='match_id', values='team')
-            .reset_index()
+            [['index', 'team', 'team_type']]
+            .pivot(columns='team_type', index='index', values='team')
+            .reset_index(drop=True)
             .rename_axis(None, axis=1)
             .assign(
                 date=start_date,
-                tournament='World Cup Knockouts',
-                home_stadium_or_not=lambda df: (df['team_home'] == host_nation)
-                .astype(int)
+                tournament='World Cup',
+                country = host_nation,
+                neutral=lambda df: (df['team_home'] != host_nation)
             )
-            [
-                [
-                    'match_id', 'date', 'tournament', 'team_home', 
-                    'team_away', 'home_stadium_or_not'
-                ]
-            ]
+            .reset_index()
+            [[
+                'index', 'date', 'tournament', 'team_home', 
+                'team_away', 'country', 'neutral'
+            ]]
     )
 
     return matchday
 
 
+def locate_draws(predictions_matchday: pd.DataFrame) -> pd.Series:
+    draws: pd.Series = (
+        predictions_matchday
+            .loc[
+                lambda df: (
+                    df['win_home'] == False) & (df['loss_home'] == False
+                )
+            ]
+            ['index']
+    )
+
+    return draws
+
+
+def predict_shootouts(
+        predictions_matchday: pd.DataFrame, 
+        draws: pd.Series, 
+        rng: np.random.Generator
+) -> pd.DataFrame:
+    samples: np.ndarray = rng.uniform(size=len(draws))
+
+    shootout_wins_home = [
+        draw for draw, sample in zip(draws, samples) if sample >= 0.5
+    ]
+
+    predictions_post_shootout: pd.DataFrame = (
+        predictions_matchday
+            .assign(
+                win_home=lambda df: np.where(
+                    df['index'].isin(shootout_wins_home), 
+                    True, 
+                    df['win_home']
+                ),
+                win_away=lambda df: np.where(
+                    (df['index'].isin(draws)) & 
+                        (~df['index'].isin(shootout_wins_home)),
+                    True,
+                    df['win_away']
+                )
+            )
+    )
+
+    return predictions_post_shootout
+
+
+def get_next_round(predictions_post_shootout: pd.DataFrame) -> pd.DataFrame:
+    bracket_teams_next_round: pd.DataFrame = (
+        melt_matches(predictions_post_shootout)
+            .loc[lambda df: df['win']]
+            .assign(
+                index=[i // 2 for i in range(len(predictions_post_shootout))]
+            )
+    )
+
+    return bracket_teams_next_round
+
+
 def get_winner(predictions_knockout_stage: list[pd.DataFrame]) -> str:
     winner: str = (
-        ef.melt_matches(predictions_knockout_stage[-1])
+        melt_matches(predictions_knockout_stage[-1])
             .loc[lambda df: df['win']]
             ['team']
             .iloc[0]

@@ -4,13 +4,13 @@ from functools import reduce
 
 
 def get_pre_match_elos(
-        match_records: pd.DataFrame
+        matches: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     match_records_list: list[pd.DataFrame] = [
-        match_records.iloc[[i]] for i in range(len(match_records))
+        matches.iloc[[i]] for i in range(len(matches))
     ]
 
-    elos: pd.DataFrame = get_initial_elos(match_records)
+    elos: pd.DataFrame = get_initial_elos(matches)
 
     matches_so_far: pd.DataFrame = pd.DataFrame()
 
@@ -23,15 +23,13 @@ def get_pre_match_elos(
     return elos_pre_match, elos
 
 
-def get_initial_elos(match_records: pd.DataFrame) -> pd.DataFrame:
+def get_initial_elos(matches: pd.DataFrame) -> pd.DataFrame:
     elos_initial: pd.DataFrame = (
         pd.DataFrame()
             .assign(
-                team=pd.concat(
-                    [
-                        match_records['team_home'], 
-                        match_records['team_away']
-                    ]
+                team=pd.concat([
+                    matches['team_home'], 
+                    matches['team_away']]
                 ).unique(),
                 elo=1000
             )
@@ -48,9 +46,10 @@ def get_update_elos(
 
     match_record_joined: pd.DataFrame = join_pre_match_elos(match_record, elos)
     
-    matches_so_far: pd.DataFrame = pd.concat(
-        [matches_so_far, match_record_joined]
-    )
+    matches_so_far: pd.DataFrame = pd.concat([
+        matches_so_far, 
+        match_record_joined
+    ])
 
     elos: pd.DataFrame = update_elos(elos, match_record_joined)
 
@@ -120,8 +119,7 @@ def get_updated_elos(match_record: pd.Series) -> tuple[float, float]:
         pd.Series(match_record['tournament'])
             .map(
                 {
-                    'World Cup Knockouts': 60,
-                    'World Cup Groups': 50,
+                    'World Cup': 55,
                     'Confederation Cup': 40,
                     'Qualifiers': 25,
                     'Nations League': 15,
@@ -163,10 +161,7 @@ def get_elo(
             else 0
     )
     
-    result_expected: float = (
-        1 / 
-        (1 + 10**((elo_opponent-elo_team)/600))
-    )
+    result_expected: float = (1 / (1 + 10**((elo_opponent-elo_team)/600)))
 
     elo: float = (
         elo_team 
@@ -177,37 +172,36 @@ def get_elo(
 
 
 def extract_match_features(
-        match_records: pd.DataFrame, 
+        matches: pd.DataFrame, 
         elos_pre_match: pd.DataFrame
 ) -> pd.DataFrame:
-    team_matches: pd.DataFrame = melt_matches(match_records)
+    team_matches: pd.DataFrame = melt_matches(matches)
 
     team_match_features: pd.DataFrame = extract_team_match_features(
         team_matches
     )
 
-    matches: pd.DataFrame = join_team_match_features(
+    match_features: pd.DataFrame = join_team_match_features(
         elos_pre_match, 
         team_match_features
     )
 
-    return matches
+    return match_features
 
 
 def melt_matches(
-        match_records: pd.DataFrame, 
-        id_vars: list[str] = ['match_id', 'date']
+        matches: pd.DataFrame, 
+        id_vars: list[str] = ['index', 'date']
 ) -> pd.DataFrame:
     value_vars: list[str] = list(
-        match_records.columns[
-            match_records.columns.str.contains('_home|_away')
+        matches.columns[
+            matches.columns.str.contains('_home|_away')
         ]
     )
 
     matches_melted: pd.DataFrame = (
-        match_records
+        matches
             .melt(id_vars=id_vars, value_vars=value_vars)
-            .sort_values(id_vars)
             .assign(
                 var_name=lambda df: df['variable'].str.rsplit('_', n=1).str[0],
                 team_type=lambda df: df['variable'].str.rsplit('_', n=1).str[1]
@@ -229,42 +223,22 @@ def extract_team_match_features(team_matches: pd.DataFrame) -> pd.DataFrame:
         team_matches
             .assign(
                 **{
-                    f'form_avg_{col}': lambda df, col=col: df
-                        .groupby('team')
-                        [col]
-                        .transform(
-                            lambda x: x
-                                .shift(1)
-                                .rolling(window=10, min_periods=1)
-                                .mean()
-                                .astype(float)
-                                .fillna(0)
-                        )
-                    for col in (
-                        'win', 'loss', 'goals_for', 'goals_against'
+                    f'form_avg_{col}': lambda df, col=col: get_form_stat(
+                        df, 
+                        col
                     )
+                    for col in ('win', 'loss', 'goals_for', 'goals_against')
                 },
                 **{
-                    f'h2h_sum_{col}': lambda df, col=col: df
-                        .groupby(['team', 'opponent'])
-                        [col]
-                        .transform(
-                            lambda x: x
-                                .shift(1)
-                                .cumsum()
-                                .astype(float)
-                                .fillna(0)
-                            )
+                    f'h2h_sum_{col}': lambda df, col=col: get_h2h_sum(df, col)
                     for col in ('win', 'loss')
                 },
                 count_cumulative=lambda df: df
                     .groupby(['team', 'opponent'])
                     .cumcount(),
                 **{
-                    f'h2h_rate_{result}': lambda df, result=result:
-                        (df[f'h2h_sum_{result}'] / df['count_cumulative'])
-                            .astype(float)
-                            .fillna(0)
+                    f'h2h_rate_{result}': 
+                        lambda df, result=result: get_h2h_rate(df, result)
                     for result in ('win', 'loss')
                 },
                 **{
@@ -277,34 +251,82 @@ def extract_team_match_features(team_matches: pd.DataFrame) -> pd.DataFrame:
     return team_match_features
 
 
+def get_form_stat(df: pd.DataFrame, col: str) -> pd.Series:
+    form_stat: pd.Series = (
+        df
+            .groupby('team')
+            [col]
+            .transform(
+                lambda x: x
+                    .shift(1)
+                    .rolling(window=10, min_periods=1)
+                    .mean()
+                    .astype(float)
+                    .fillna(0)
+            )
+    )
+
+    return form_stat
+
+
+def get_h2h_sum(df: pd.DataFrame, col: str) -> pd.Series:
+    h2h_sum: pd.Series = (
+        df
+            .groupby(['team', 'opponent'])
+            [col]
+            .transform(
+                lambda x: x
+                    .shift(1)
+                    .cumsum()
+                    .astype(float)
+                    .fillna(0)
+            )
+    )
+
+    return h2h_sum
+
+
+def get_h2h_rate(df: pd.DataFrame, result: str) -> pd.Series:
+    h2h_rate: pd.Series = (
+        (df[f'h2h_sum_{result}'] / df['count_cumulative'])
+            .astype(float)
+            .fillna(0)
+    )
+
+    return h2h_rate
+
+
 def join_team_match_features(
         elos_pre_match: pd.DataFrame, 
         team_match_features: pd.DataFrame
 ) -> pd.DataFrame:
     values: list[str] = list(
         team_match_features.columns[
-            (team_match_features.columns.str.contains("form_avg_|h2h_rate_")) 
-                | (team_match_features.columns.isin(('win', 'loss')))
+            team_match_features.columns.str.contains("form_avg_|h2h_rate_")
         ]
     )
 
-    matches: pd.DataFrame = (
+    features: pd.DataFrame = (
         team_match_features
             .pivot(
-                index='match_id', 
+                index='index', 
                 columns='team_type', 
                 values=values
             )
             .reset_index()
     )
     
-    matches.columns = flatten_columns(matches.columns)
+    features.columns = flatten_columns(features.columns)
 
-    matches = matches.rename_axis(None, axis=1)
+    features = features.rename_axis(None, axis=1)
 
-    matches = elos_pre_match.merge(matches, how='left', on='match_id')
+    match_features = elos_pre_match.merge(
+        features, 
+        how='left', 
+        on='index'
+    )
     
-    return matches
+    return match_features
 
 
 def flatten_columns(df_columns: pd.Index) -> list[str]:

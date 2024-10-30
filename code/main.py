@@ -1,54 +1,43 @@
-from os import listdir
+import kagglehub
 import pandas as pd
+from os import listdir
 import numpy as np
 from sklearn.pipeline import Pipeline
-import import_data as id
-import clean_data as cd
-import extract_features as ef
-import select_model as sm
-import simulate_tournament as st
+from clean_data import get_clean_matches
+from extract_features import get_pre_match_elos, extract_match_features
+from select_model import select_model
+from simulate_tournament import simulate_tournament
 
 
 def main() -> None:
-    dir: str = [directory]
-
-    file_names: list[str] = [
-        x for x in listdir(dir + '/data') if x.endswith('.csv')
-    ]
-
-    match_records_wc, match_records_intl = id.read_datasets(dir, file_names)
-
-    columns_to_keep: list[str] = [
-        'date', 'tournament', 'team_home', 'goals_home', 
-        'team_away', 'goals_away', 'home_stadium_or_not'
-    ]
-
-    match_records: pd.DataFrame = cd.clean_matches(
-        match_records_intl,
-        match_records_wc,
-        columns_to_keep
+    path: str = kagglehub.dataset_download(
+        'patateriedata/all-international-football-results'
     )
 
-    elos_pre_match, elos = ef.get_pre_match_elos(match_records)
+    datasets_raw: dict[str, pd.DataFrame] = {
+        file_name: pd.read_csv(f'{path}/{file_name}') 
+        for file_name in listdir(path)
+    }
 
-    matches: pd.DataFrame = ef.extract_match_features(
-        match_records, 
+    matches: pd.DataFrame = get_clean_matches(datasets_raw)
+
+    matches = matches.loc[lambda df: df['date'] < '2022-11-20']
+
+    elos_pre_match, elos = get_pre_match_elos(matches)
+
+    match_features: pd.DataFrame = extract_match_features(
+        matches, 
         elos_pre_match
     )
 
-    model: Pipeline = sm.select_model(matches)
+    model: Pipeline = select_model(match_features)
 
     rng: np.random.Generator = np.random.default_rng(42)
 
     n_sims: int = 1000
 
     winners: list[str] = [
-        st.simulate_tournament(
-            model, 
-            match_records, 
-            elos,
-            rng
-        )[2]
+        simulate_tournament(model, matches, elos, rng)[2]
         for i in range(n_sims)
     ]
 

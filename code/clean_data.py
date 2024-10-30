@@ -1,101 +1,89 @@
 import pandas as pd
 import numpy as np
+from functools import reduce
 
 
-def clean_matches(
-        match_records_intl: pd.DataFrame, 
-        match_records_wc: pd.DataFrame,
-        columns_to_keep: list[str]
+def get_clean_matches(datasets_raw: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    country_names, matches_raw = datasets_raw.values()
+
+    country_cols: list[str] = ['home_team', 'away_team', 'country']
+
+    matches_all_names_replaced: pd.DataFrame = reduce(
+        lambda df, col: replace_original_names(df, col, country_names),
+        country_cols,
+        matches_raw
+    )
+
+    matches_prepared: pd.DataFrame = (
+        matches_all_names_replaced
+            .reset_index()
+            .rename(swap_underscore, axis=1)
+    )
+
+    matches = process_matches(matches_prepared)
+
+    return matches
+
+
+def replace_original_names(
+        df: pd.DataFrame, 
+        col: str, 
+        country_names: pd.DataFrame
 ) -> pd.DataFrame:
-    match_records_intl_clean: pd.DataFrame = clean_intl_matches(
-        match_records_intl, 
-        columns_to_keep
-    )
-
-    match_records_wc_clean: pd.DataFrame = clean_wc_matches(
-        match_records_wc,
-        columns_to_keep
-    )
-
-    match_records_combined: pd.DataFrame = pd.concat(
-        [match_records_intl_clean, match_records_wc_clean]
-    )
-
-    match_records: pd.DataFrame = clean_match_records(match_records_combined)
-
-    return match_records
-
-
-def clean_intl_matches(
-        match_records_intl: pd.DataFrame,
-        columns_to_keep: list[str]
-) -> pd.DataFrame:
-    match_records_intl_clean: pd.DataFrame = (
-        match_records_intl
-            .assign(date=lambda df: pd.to_datetime(df['date']))
-            .rename(
-                columns={
-                    'home_team': 'team_home',
-                    'home_goals': 'goals_home',
-                    'away_team': 'team_away',
-                    'away_goals': 'goals_away' 
+    matches_names_replaced: pd.DataFrame = (
+        df
+            .assign(
+                **{
+                    col: lambda df: np.where(
+                        df[col] == 'São Tomé and Príncipe', 
+                        'Sao Tome and Principe', 
+                        df[col]
+                    )
                 }
             )
-            [columns_to_keep]
+            .merge(
+                country_names, 
+                how='left', 
+                left_on=col, 
+                right_on='original_name'
+            )
+            .assign(**{col: lambda df: df['current_name']})
+            .drop(country_names.columns, axis=1)
+    )
+    
+    return matches_names_replaced
+
+
+def remove_accents(column: pd.Series) -> pd.Series:
+    accents_removed: pd.Series = (
+        column
+            .str.normalize('NFKD')
+            .str.encode('ascii', errors='ignore')
+            .str.decode('utf-8')
     )
 
-    return match_records_intl_clean
+    return accents_removed
 
 
-def clean_wc_matches(
-        match_records_wc: pd.DataFrame,
-        columns_to_keep: list[str]
-) -> pd.DataFrame:
-    match_records_wc_clean: pd.DataFrame = (
-        match_records_wc
+def process_matches(matches_raw: pd.DataFrame) -> pd.DataFrame:
+    matches: pd.DataFrame = (
+        matches_raw
             .assign(
-                tournament=lambda df: np.where(
-                    df['stage'] == 'Group stage', 
-                    'FIFA World Cup Group Stage',
-                    'FIFA World Cup Knockout Stage'
-                ),
-                date=lambda df: pd.to_datetime(
-                    pd.DataFrame({'year': df['year'], 'month': 1, 'day': 1})
-                )
-            )
-            .rename(
-                columns={
-                    'host_team_or_not': 'home_stadium_or_not',
-                    'home_team': 'team_home',
-                    'home_goals': 'goals_home',
-                    'away_team': 'team_away',
-                    'away_goals': 'goals_away'
-                }
-            )
-            [columns_to_keep]
-    )
-
-    return match_records_wc_clean
-
-
-def clean_match_records(match_records: pd.DataFrame) -> pd.DataFrame:
-    match_records = (
-        match_records
-            .sort_values('date')
-            .reset_index(drop=True)
-            .assign(
-                match_id=lambda df: df.index,
                 tournament=lambda df: classify_tournament(df['tournament']),
                 result_home=lambda df: get_match_result(
-                    df['goals_home'], 
-                    df['goals_away']
+                    df['score_home'], 
+                    df['score_away']
                 ),
                 result_away=lambda df: get_match_result(
-                    df['goals_away'], 
-                    df['goals_home']
+                    df['score_away'], 
+                    df['score_home']
                 ),
-                goals_against_home=lambda df: df['goals_away'],
-                goals_against_away=lambda df: df['goals_home'],
+                **{
+                    col: lambda df, col=col: truncate_score(df, col)
+                    for col in ('score_home', 'score_away')
+                },
+                goals_against_home=lambda df: df['score_away'],
+                goals_against_away=lambda df: df['score_home'],
                 opponent_home=lambda df: df['team_away'],
                 opponent_away=lambda df: df['team_home'],
                 **{
@@ -104,64 +92,68 @@ def clean_match_records(match_records: pd.DataFrame) -> pd.DataFrame:
                         df[f'result_{team_type}'] == result
                     for result in ('win', 'loss') 
                     for team_type in ('home', 'away')
-                },
-                **{
-                    col: lambda df, col=col: np.where(
-                        df[col] >= 10,
-                        10,
-                        df[col]
-                    ) 
-                    for col in ('goals_home', 'goals_away')
                 }
             )
             .rename(
                 columns={
-                    'goals_home': 'goals_for_home', 
-                    'goals_away': 'goals_for_away'
+                    'score_home': 'goals_for_home', 
+                    'score_away': 'goals_for_away'
                 }
             )
     )
 
-    return match_records
+    return matches
+
+
+def swap_underscore(text: str) -> str:
+    if '_' in text:
+        first, second = text.split('_', 1)
+
+        return f"{second}_{first}"
+    
+    return text
 
 
 def classify_tournament(tournament: pd.Series) -> np.ndarray:
     tournament_classified: np.ndarray = np.select(
         (
+            (tournament == 'World Cup'),
             tournament.isin((
-                'FIFA World Cup Knockout Stage', 
-                'World Cup Knockouts'
-            )),
-            tournament.isin((
-                'FIFA World Cup Group Stage',
-                'World Cup Groups'
-            )),
-            tournament.isin((
-                'CONMEBOL-UEFA Cup of Champions',
-                'AFC Asian Cup',
-                'African Cup of Nations',
+                'Intercontinental Champ',
+                'Artemio Franchi Trophy',
+                'Asian Cup',
+                'African Nations Cup',
                 'Copa America',
-                'Gold Cup',
-                'UEFA Euro',
+                'Copa América',
+                'CONCACAF Championship',
+                'European Championship',
+                'Confederations Cup',
                 'Confederation Cup'
             )),
             tournament.isin((
-                'FIFA World Cup qualification',
-                'AFC Asian Cup qualification',
-                'African Cup of Nations qualification',
-                'Gold Cup qualification',
-                'UEFA Euro qualification',
+                'World Cup qualifier'
+                'Asian Cup qualifier',
+                'African Nations Cup qualifier',
+                'Copa América qualifier',
+                'CONCACAF Champ qual',
+                'European Championship qual'
                 'Qualifiers'
             )),
             tournament.isin((
-                'UEFA Nations League',
+                'European Nations League',
+                'European Nations League A',
+                'European Nations League B',
+                'European Nations League C',
+                'European Nations League D',
                 'CONCACAF Nations League',
+                'CONCACAF Nations League A',
+                'CONCACAF Nations League B',
+                'CONCACAF Nations League C',
                 'Nations League'
             ))
         ),
         (
-            'World Cup Knockouts', 
-            'World Cup Groups', 
+            'World Cup', 
             'Confederation Cup',
             'Qualifiers',
             'Nations League'
@@ -183,3 +175,9 @@ def get_match_result(
     )
 
     return match_result
+
+
+def truncate_score(df: pd.DataFrame, col: str) -> np.ndarray:
+    score_truncated: np.ndarray = np.where(df[col] >= 10, 10, df[col])
+
+    return score_truncated
